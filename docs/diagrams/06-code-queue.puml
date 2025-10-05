@@ -1,0 +1,81 @@
+@startuml
+title Queue Implementation - Redis Streams
+
+class Queue {
+  -adapter : RedisAdapter
+  -config : QueueConfig
+  -processing : map[id]*Message
+  -stopChan : chan struct{}
+  +Publish(ctx, data, metadata) error
+  +PublishJSON(ctx, obj, metadata) error
+  +Consume(handler MessageHandler) error
+  +Stop(timeout Duration) error
+  -reclaimPendingMessages()
+}
+
+class QueueConfig {
+  +Name : string
+  +ConsumerGroup : string
+  +ConsumerName : string
+  +BatchSize : int
+  +BlockTime : Duration
+  +VisibilityTimeout : Duration
+  +MaxRetries : int
+  +DeadLetterQueue : string
+}
+
+class Message {
+  +ID : string
+  +Data : []byte
+  +Metadata : map[string]string
+  +Timestamp : time.Time
+  +Attempts : int
+  +Ack() error
+  +Nack() error
+}
+
+interface MessageHandler {
+  +Handle(ctx Context, msg *Message) error
+}
+
+interface RedisAdapter {
+  +XAdd(ctx, stream, values) string
+  +XReadGroup(ctx, group, consumer, streams) []Message
+  +XAck(ctx, stream, group, ids) int64
+  +XPending(ctx, stream, group) []PendingMessage
+  +XClaim(ctx, stream, group, consumer, minIdle, ids) []Message
+}
+
+Queue o-- "1" QueueConfig : configured by
+Queue o-- "1" RedisAdapter : uses
+Queue --> "0..*" Message : publishes/consumes
+MessageHandler ..> Message : handles
+Queue ..> MessageHandler : invokes
+
+note right of Queue
+  **Publishing:**
+  - Serializes data to JSON/bytes
+  - XADD to Redis stream
+  - Returns message ID
+
+  **Consuming:**
+  - XREADGROUP blocks for messages
+  - Invokes handler per message
+  - Auto ACK on success
+  - Manual NACK moves to DLQ
+
+  **Reclaim Loop:**
+  - XPENDING finds stuck messages
+  - XCLAIM after visibility timeout
+  - Reprocesses or moves to DLQ
+end note
+
+note bottom of Message
+  **At-Least-Once Semantics:**
+  - Consumer groups track position
+  - ACK confirms processing
+  - NACK triggers retry or DLQ
+  - Attempts counter tracks retries
+end note
+
+@enduml

@@ -1,0 +1,40 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Component Diagram - API Server
+
+Container_Boundary(api_server, "API Server") {
+    Component(router, "FastHTTP Router", "fasthttp/router", "Routes HTTP requests")
+    Component(middleware, "Middleware Stack", "pkg/http", "Compression, timeout, logging, recovery")
+    Component(message_handler, "Message Handler", "handlers", "Handles message creation requests")
+    Component(message_service, "Message Service", "services", "Business logic for message operations")
+    Component(customer_repo, "Customer Repository", "repository", "Customer data access")
+    Component(message_repo, "Message Repository", "repository", "Message data access")
+    Component(transaction_repo, "Transaction Repository", "repository", "Transaction data access")
+    Component(queue_client, "Queue Client", "queue", "Redis Streams wrapper")
+    Component(config, "Config", "config", "Environment-based configuration")
+}
+
+ContainerDb(postgres_read, "PostgreSQL (Read)")
+ContainerDb(postgres_write, "PostgreSQL (Write)")
+ContainerQueue(redis, "Redis Streams")
+
+Rel(router, middleware, "Applies middleware")
+Rel(middleware, message_handler, "Routes to handler")
+Rel(message_handler, message_service, "Delegates business logic")
+Rel(message_service, customer_repo, "Validates balance")
+Rel(message_service, message_repo, "Creates message")
+Rel(message_service, transaction_repo, "Records transaction")
+Rel(message_service, queue_client, "Enqueues message")
+
+Rel(customer_repo, postgres_read, "SELECT", "GORM")
+Rel(message_repo, postgres_write, "INSERT", "GORM")
+Rel(transaction_repo, postgres_write, "INSERT", "GORM")
+Rel(queue_client, redis, "XADD", "go-redis")
+
+Rel(message_handler, config, "Reads")
+Rel(message_service, config, "Reads")
+
+@enduml

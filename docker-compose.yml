@@ -1,0 +1,327 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sms-gateway-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin
+      POSTGRES_DB: sms_gateway
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d sms_gateway"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sms-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: sms-gateway-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - sms-network
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile.cli
+    container_name: sms-gateway-migrate
+    environment:
+      POSTGRES_READ_HOST: postgres
+      POSTGRES_READ_PORT: 5432
+      POSTGRES_READ_USER: admin
+      POSTGRES_READ_PASSWORD: admin
+      POSTGRES_READ_DBNAME: sms_gateway
+      POSTGRES_WRITE_HOST: postgres
+      POSTGRES_WRITE_PORT: 5432
+      POSTGRES_WRITE_USER: admin
+      POSTGRES_WRITE_PASSWORD: admin
+      POSTGRES_WRITE_DBNAME: sms_gateway
+    command: ["/app/cli", "--env=/app/.env.docker", "--dir=/app/migrations"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - sms-network
+    volumes:
+      - ./migrations:/app/migrations
+      - ./.env.docker:/app/.env.docker
+
+  operator:
+    build:
+      context: .
+      dockerfile: Dockerfile.operator
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-none}
+        DATE: ${DATE:-unknown}
+    container_name: sms-gateway-operator
+    restart: unless-stopped
+    environment:
+      PORT: 8081
+      DELIVERY_RATE: 0.95
+      MIN_DELAY: 100ms
+      MAX_DELAY: 2s
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - sms-network
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-none}
+        DATE: ${DATE:-unknown}
+    container_name: sms-gateway-api
+    restart: unless-stopped
+    environment:
+      APP_ENV: prod
+      HTTP_LISTEN_ADDR: :8080
+      POSTGRES_READ_HOST: postgres
+      POSTGRES_READ_PORT: 5432
+      POSTGRES_READ_USER: admin
+      POSTGRES_READ_PASSWORD: admin
+      POSTGRES_READ_DBNAME: sms_gateway
+      POSTGRES_WRITE_HOST: postgres
+      POSTGRES_WRITE_PORT: 5432
+      POSTGRES_WRITE_USER: admin
+      POSTGRES_WRITE_PASSWORD: admin
+      POSTGRES_WRITE_DBNAME: sms_gateway
+      REDIS_ADDR: redis:6379
+      REDIS_USER: ""
+      REDIS_PASS: ""
+      REDIS_DATABASE: 0
+      REDIS_UNIVERSAL_KEY_PREFIX: prod_
+      QUEUE_NAME: messages_queue
+      QUEUE_CONSUMER_GROUP: messages_processors
+      QUEUE_MAX_RETRIES: 3
+      QUEUE_VISIBILITY_TIMEOUT: 1m
+      QUEUE_POLL_INTERVAL: 500ms
+      QUEUE_BATCH_SIZE: 100
+      QUEUE_MAX_LEN: 5000000
+      QUEUE_ENABLE_DLQ: "true"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - sms-network
+
+  express-processor:
+    build:
+      context: .
+      dockerfile: Dockerfile.processor
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-none}
+        DATE: ${DATE:-unknown}
+#    container_name: sms-gateway-processor
+    restart: unless-stopped
+    environment:
+      APP_ENV: prod
+      POSTGRES_READ_HOST: postgres
+      POSTGRES_READ_PORT: 5432
+      POSTGRES_READ_USER: admin
+      POSTGRES_READ_PASSWORD: admin
+      POSTGRES_READ_DBNAME: sms_gateway
+      POSTGRES_WRITE_HOST: postgres
+      POSTGRES_WRITE_PORT: 5432
+      POSTGRES_WRITE_USER: admin
+      POSTGRES_WRITE_PASSWORD: admin
+      POSTGRES_WRITE_DBNAME: sms_gateway
+      REDIS_ADDR: redis:6379
+      REDIS_USER: ""
+      REDIS_PASS: ""
+      REDIS_DATABASE: 0
+      REDIS_UNIVERSAL_KEY_PREFIX: prod_
+      QUEUE_NAME: messages_queue:express
+      QUEUE_CONSUMER_GROUP: messages_processors
+      QUEUE_MAX_RETRIES: 3
+      QUEUE_VISIBILITY_TIMEOUT: 1m
+      QUEUE_POLL_INTERVAL: 500ms
+      QUEUE_BATCH_SIZE: 50
+      QUEUE_MAX_LEN: 5000000
+      QUEUE_ENABLE_DLQ: "true"
+      QUEUE_CONSUMER_INSTANCES: 5
+      QUEUE_WORKERS_PER_INSTANCE: 10
+      PROVIDER_PRIMARY_URL: http://operator:8081
+      PROVIDER_SECONDARY_URL: http://operator:8081
+      PROVIDER_BACKUP_URL: http://operator:8081
+    ports:
+      - "9100-9101:9100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      operator:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9100/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - sms-network
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  processor:
+    build:
+      context: .
+      dockerfile: Dockerfile.processor
+      args:
+        VERSION: ${VERSION:-dev}
+        COMMIT: ${COMMIT:-none}
+        DATE: ${DATE:-unknown}
+#    container_name: sms-gateway-processor
+    restart: unless-stopped
+    environment:
+      APP_ENV: prod
+      POSTGRES_READ_HOST: postgres
+      POSTGRES_READ_PORT: 5432
+      POSTGRES_READ_USER: admin
+      POSTGRES_READ_PASSWORD: admin
+      POSTGRES_READ_DBNAME: sms_gateway
+      POSTGRES_WRITE_HOST: postgres
+      POSTGRES_WRITE_PORT: 5432
+      POSTGRES_WRITE_USER: admin
+      POSTGRES_WRITE_PASSWORD: admin
+      POSTGRES_WRITE_DBNAME: sms_gateway
+      REDIS_ADDR: redis:6379
+      REDIS_USER: ""
+      REDIS_PASS: ""
+      REDIS_DATABASE: 0
+      REDIS_UNIVERSAL_KEY_PREFIX: prod_
+      QUEUE_NAME: messages_queue
+      QUEUE_CONSUMER_GROUP: messages_processors
+      QUEUE_MAX_RETRIES: 3
+      QUEUE_VISIBILITY_TIMEOUT: 1m
+      QUEUE_POLL_INTERVAL: 500ms
+      QUEUE_BATCH_SIZE: 100
+      QUEUE_MAX_LEN: 5000000
+      QUEUE_ENABLE_DLQ: "true"
+      QUEUE_CONSUMER_INSTANCES: 5
+      QUEUE_WORKERS_PER_INSTANCE: 10
+      PROVIDER_PRIMARY_URL: http://operator:8081
+      PROVIDER_SECONDARY_URL: http://operator:8081
+      PROVIDER_BACKUP_URL: http://operator:8081
+    ports:
+      - "9102:9100"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      operator:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9100/metrics"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - sms-network
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: sms-gateway-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - sms-network
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: sms-gateway-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - sms-network
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  sms-network:
+    driver: bridge

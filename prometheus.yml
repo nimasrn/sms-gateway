@@ -1,0 +1,17 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: 'sms-gateway'
+    environment: 'production'
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: [ 'localhost:9090' ]
+
+  - job_name: 'sms-processor'
+    static_configs:
+      - targets: [ 'processor:9100', 'sms-gateway-express-processor-1:9100','sms-gateway-express-processor-2:9100' ]
+    metrics_path: '/metrics'
+    scrape_interval: 10s

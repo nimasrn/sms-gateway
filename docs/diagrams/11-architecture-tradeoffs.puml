@@ -1,0 +1,107 @@
+@startuml
+'https://plantuml.com/mindmap-diagram
+
+@startmindmap
+title Architecture Trade-offs & Migration Path
+
+* SMS Gateway\nArchitecture Evolution
+** CURRENT STATE\n(10M msg/day)
+***[#lightgreen] ✓ STRENGTHS
+**** Simple to operate\nRedis Streams + Monolith
+**** Fast development\nSingle codebase
+**** Low infrastructure cost\n~$500-1000/month
+**** Worker pool concurrency\n100 goroutines
+**** Circuit breaker pattern\nIntelligent routing
+***[#pink] ✗ LIMITATIONS
+**** Redis bottleneck\n50K ops/sec max
+**** Single point of failure\nNo Redis clustering
+**** HTTP provider APIs\n10-20 msg/sec per conn
+**** No horizontal scaling\nStateful architecture
+**** Single region\nNo global reach
+
+** TARGET STATE\n(100M+ msg/day)
+***[#lightgreen] ✓ ADVANTAGES
+**** Kafka throughput\n605 MB/s (15x faster)
+**** Microservices isolation\nIndependent scaling
+**** SMPP protocol\n1,000 msg/sec per bind
+**** Multi-region\nGlobal deployment
+**** Event sourcing\nComplete audit trail
+***[#pink] ✗ COMPLEXITY
+**** Operational overhead\n10+ microservices
+**** Infrastructure cost\n$10K-50K/month
+**** Team expertise\nKafka + SMPP skills
+**** Migration risk\nDowntime concerns
+**** Distributed debugging\nTracing required
+
+** MIGRATION PHASES
+*** Phase 1: Queue Layer\n(Months 1-2)
+**** Replace Redis Streams\nwith Kafka
+**** Keep monolithic services\nMinimal code changes
+**** Implement 4 priority topics\nUrgent, High, Normal, Bulk
+**** Capacity gain: 10M → 50M\nmsg/day
+*** Phase 2: Service Decomposition\n(Months 3-4)
+**** Extract Message Service\nValidation + routing
+**** Extract Delivery Service\nCarrier integration
+**** Extract DLR Service\nWebhook handling
+**** Add gRPC communication\nBetween services
+*** Phase 3: SMPP Integration\n(Months 5-6)
+**** Implement SMPP client\n3.4 protocol
+**** Negotiate carrier binds\n4-10 per operator
+**** Replace HTTP APIs\nGradual migration
+**** Capacity gain: 50M → 100M+\nmsg/day
+*** Phase 4: Multi-Region\n(Months 7-9)
+**** Deploy US-East cluster\nActive-active
+**** Deploy EU cluster\nGDPR compliance
+**** Implement global routing\nLatency-based DNS
+**** Add cross-region replication\nCockroachDB/DynamoDB
+
+** KEY TRADE-OFF DECISIONS
+***[#lightyellow] When to Stay Simple
+**** Traffic < 10M msg/day
+**** Single region sufficient
+**** Team < 5 engineers
+**** Limited budget
+**** HTTP providers only
+***[#lightyellow] When to Migrate
+**** Traffic > 20M msg/day
+**** Global expansion needed
+**** Team > 10 engineers
+**** SLA requirements < 100ms
+**** Direct carrier integration
+
+** PERFORMANCE COMPARISON
+*** Current (Redis + HTTP)
+**** Queue: 50K ops/sec
+**** Workers: 200 (2 instances)
+**** Providers: 10-20 msg/sec
+**** Total: ~10M msg/day
+**** Latency: p95 ~500ms
+*** Target (Kafka + SMPP)
+**** Queue: 605 MB/s
+**** Workers: 1000+ (auto-scale)
+**** Providers: 1000 msg/sec
+**** Total: 100M+ msg/day
+**** Latency: p95 ~50ms
+
+** COST ANALYSIS
+*** Current Infrastructure
+**** 2 API servers: $200/month
+**** 2 Processors: $400/month
+**** Redis: $100/month
+**** PostgreSQL: $300/month
+**** Total: ~$1,000/month
+*** Target Infrastructure
+**** 10-20 API Gateways: $2K
+**** 50 Microservice instances: $8K
+**** 5 Kafka brokers: $10K
+**** Multi-region DB: $5K
+**** Monitoring stack: $2K
+**** Total: ~$27K/month
+*** Cost Per Message
+**** Current: $0.001 (infra only)
+**** Target: $0.00027 (@ 100M/day)
+**** Economies of scale
+
+@endmindmap
+
+@enduml

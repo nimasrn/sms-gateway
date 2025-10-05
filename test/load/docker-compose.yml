@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  golang-load-test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - TARGET_URL=${TARGET_URL:-http://host.docker.internal:8080/api/v1/messages}
+      - REQUESTS_PER_SECOND=${REQUESTS_PER_SECOND:-5000}
+      - DURATION_SECONDS=${DURATION_SECONDS:-30}
+      - CONCURRENT_WORKERS=${CONCURRENT_WORKERS:-500}
+      - API_KEY=${API_KEY:-}
+    network_mode: "host"

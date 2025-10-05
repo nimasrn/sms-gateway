@@ -1,0 +1,42 @@
+@startuml
+title Code Level - Gateway Client Send Flow
+
+participant "Processor" as P
+participant "Client.Send()" as C
+participant "selectProvider()" as S
+participant "rankProviders()" as R
+participant "Circuit Breaker" as CB
+participant "FastHTTP Client" as H
+participant "recordMetrics()" as M
+participant "Provider" as PR
+
+P -> C: Send(message)
+C -> S: Select best provider
+S -> R: Rank all providers
+R -> R: Calculate score =\nweight * successRate *\n(1 - normalizedLatency)
+R -> CB: Check if provider open
+CB --> R: Provider status
+R --> S: Ranked providers list
+S --> C: Best available provider
+
+C -> H: POST /api/v1/sms/send
+H -> PR: HTTP request
+PR --> H: Response (200 OK / error)
+H --> C: Result
+
+alt Success
+    C -> M: Record success, latency
+    M -> M: Update successRate,\navgLatency, requestCount
+    C --> P: Success
+else Failure
+    C -> M: Record failure
+    M -> M: Increment failureCount
+    M -> CB: Check threshold
+    alt Threshold exceeded
+        CB -> CB: Open circuit\n(disable provider)
+    end
+    C -> C: Retry with next provider
+    C --> P: Retry or failure
+end
+
+@enduml

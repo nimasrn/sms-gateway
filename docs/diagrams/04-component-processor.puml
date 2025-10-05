@@ -1,0 +1,40 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Component Diagram - Processor
+
+Container_Boundary(processor, "Processor") {
+    Component(worker_pool, "Worker Pool", "pkg/worker", "Concurrent message processing")
+    Component(sms_processor, "SMS Processor", "processor", "Coordinates message processing")
+    Component(gateway_client, "Gateway Client", "gateways", "Multi-provider HTTP client with circuit breaker")
+    Component(provider_selector, "Provider Selector", "gateways", "Weight-based + performance-based routing")
+    Component(circuit_breaker, "Circuit Breaker", "gateways", "Failure detection and provider disable")
+    Component(health_checker, "Health Checker", "gateways", "Background provider health checks")
+    Component(delivery_repo, "Delivery Report Repository", "repository", "Delivery report data access")
+    Component(queue_consumer, "Queue Consumer", "queue", "Redis Streams consumer with ack/nack")
+    Component(metrics, "Prometheus Metrics", "pkg/prom", "Request count, latency, success rate")
+}
+
+ContainerDb(postgres_write, "PostgreSQL (Write)")
+ContainerQueue(redis, "Redis Streams")
+System_Ext(sms_providers, "SMS Providers")
+System_Ext(prometheus, "Prometheus")
+
+Rel(queue_consumer, redis, "XREAD, XACK, XNACK", "go-redis")
+Rel(queue_consumer, worker_pool, "Dispatches messages")
+Rel(worker_pool, sms_processor, "Processes")
+Rel(sms_processor, gateway_client, "Send SMS")
+Rel(gateway_client, provider_selector, "Selects best provider")
+Rel(provider_selector, circuit_breaker, "Checks provider status")
+Rel(gateway_client, sms_providers, "HTTP POST", "FastHTTP")
+Rel(sms_processor, delivery_repo, "Records report")
+Rel(delivery_repo, postgres_write, "INSERT", "GORM")
+Rel(health_checker, sms_providers, "Health check", "FastHTTP")
+Rel(health_checker, circuit_breaker, "Updates status")
+
+Rel(gateway_client, metrics, "Records metrics")
+Rel(metrics, prometheus, "Exposes :9100/metrics", "HTTP")
+
+@enduml

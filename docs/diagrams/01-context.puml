@@ -1,0 +1,43 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+
+LAYOUT_WITH_LEGEND()
+
+title System Context Diagram - SMS Gateway (Current Architecture)
+
+Person(customer, "Customer/Application", "Sends SMS messages via API\n~1,000 msg/sec sustained")
+Person(admin, "System Administrator", "Manages migrations and monitors system health")
+
+System(sms_gateway, "SMS Gateway", "High-performance SMS routing system\n\nCurrent: Redis Streams + Worker Pool\nCapacity: 10M messages/day\nTarget: Kafka microservices for 100M+/day")
+
+System_Ext(sms_provider_1, "Primary SMS Provider", "HTTP API (Weight: 100)\nIntelligent routing with circuit breaker")
+System_Ext(sms_provider_2, "Secondary SMS Provider", "HTTP API (Weight: 80)\nAutomatic failover on errors")
+System_Ext(sms_provider_3, "Backup SMS Provider", "HTTP API (Weight: 60)\nTertiary fallback")
+
+System_Ext(monitoring, "Prometheus/Grafana", "Real-time metrics & alerting\nQueue depth, throughput, latency")
+
+Rel(customer, sms_gateway, "POST /api/v1/messages", "HTTPS/REST\nRate limited per customer")
+Rel(sms_gateway, sms_provider_1, "Send SMS", "HTTPS\nDynamic provider selection")
+Rel(sms_gateway, sms_provider_2, "Failover", "HTTPS\nCircuit breaker protected")
+Rel(sms_gateway, sms_provider_3, "Last resort", "HTTPS")
+Rel(admin, sms_gateway, "Migrations & ops", "CLI/SSH")
+Rel(monitoring, sms_gateway, "Scrape /metrics", "HTTP :9100")
+
+note right of sms_gateway
+  **Current Trade-offs:**
+  ✓ Simple Redis Streams (not Kafka)
+  ✓ Monolithic API+Processor (not microservices)
+  ✓ HTTP providers (not SMPP for carriers)
+
+  **Capacity Limits:**
+  • 10M msgs/day max with current arch
+  • Single region deployment
+  • 100 worker goroutines
+
+  **Migration Path:**
+  Phase 1: Redis Streams → Kafka
+  Phase 2: Monolith → Microservices
+  Phase 3: HTTP → SMPP protocol
+end note
+
+@enduml

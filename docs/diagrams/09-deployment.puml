@@ -1,0 +1,124 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Deployment.puml
+
+title Deployment Architecture - Current State (10M msg/day capacity)
+
+Deployment_Node(app_servers, "Application Tier", "AWS/GCP/On-premise") {
+  Deployment_Node(api_cluster, "API Server Cluster") {
+    Deployment_Node(api1, "API Instance 1", "4 vCPU, 8GB RAM") {
+      Container(api_container_1, "API Service", "Go, FastHTTP", "Port 8080\nHandles ~500 req/sec")
+    }
+    Deployment_Node(api2, "API Instance 2", "4 vCPU, 8GB RAM") {
+      Container(api_container_2, "API Service", "Go, FastHTTP", "Port 8080\nHandles ~500 req/sec")
+    }
+  }
+
+  Deployment_Node(processor_cluster, "Processor Cluster") {
+    Deployment_Node(proc1, "Processor Instance 1", "8 vCPU, 16GB RAM") {
+      Container(processor_container_1, "Processor Service", "Go Worker Pool", "100 workers\n10 stream consumers\nPort 9100 (metrics)")
+    }
+    Deployment_Node(proc2, "Processor Instance 2", "8 vCPU, 16GB RAM") {
+      Container(processor_container_2, "Processor Service", "Go Worker Pool", "100 workers\n10 stream consumers")
+    }
+  }
+
+  Deployment_Node(cli_node, "Operations") {
+    Container(cli_container, "CLI Tool", "Go", "Migrations & admin")
+  }
+}
+
+Deployment_Node(data_tier, "Data Layer") {
+  Deployment_Node(postgres_cluster, "PostgreSQL Cluster", "AWS RDS/Cloud SQL") {
+    ContainerDb(postgres_write, "Primary DB", "PostgreSQL 15", "16 vCPU, 64GB RAM\nCustomers, messages,\ntransactions, reports")
+    ContainerDb(postgres_read, "Read Replica", "PostgreSQL 15", "8 vCPU, 32GB RAM\nRead-only queries")
+  }
+
+  Deployment_Node(redis_cluster, "Redis", "AWS ElastiCache/Redis Cloud") {
+    ContainerQueue(redis_streams, "Redis Streams", "Redis 7", "16GB RAM\n2 queues: normal + express\n~50K ops/sec capacity")
+  }
+}
+
+Deployment_Node(lb, "Load Balancer", "ALB/NGINX") {
+  System_Ext(load_balancer, "Load Balancer", "Round-robin\nHealth checks")
+}
+
+Deployment_Node(external, "External Services") {
+  Deployment_Node(providers, "SMS Provider APIs") {
+    System_Ext(provider1, "Primary Provider", "Weight: 100\nHTTP API")
+    System_Ext(provider2, "Secondary Provider", "Weight: 80\nHTTP API")
+    System_Ext(provider3, "Backup Provider", "Weight: 60\nHTTP API")
+  }
+
+  System_Ext(prometheus, "Prometheus", "Metrics & alerting\n15s scrape interval")
+  System_Ext(grafana, "Grafana", "Dashboards")
+}
+
+Rel(load_balancer, api_container_1, "Routes traffic", "HTTPS")
+Rel(load_balancer, api_container_2, "Routes traffic", "HTTPS")
+
+Rel(api_container_1, postgres_write, "Write ops", "SQL/TCP")
+Rel(api_container_1, postgres_read, "Read ops", "SQL/TCP")
+Rel(api_container_1, redis_streams, "XADD", "Redis Protocol")
+
+Rel(api_container_2, postgres_write, "Write ops", "SQL/TCP")
+Rel(api_container_2, postgres_read, "Read ops", "SQL/TCP")
+Rel(api_container_2, redis_streams, "XADD", "Redis Protocol")
+
+Rel(processor_container_1, redis_streams, "XREADGROUP", "Redis Protocol")
+Rel(processor_container_1, postgres_write, "Insert reports", "SQL/TCP")
+Rel(processor_container_1, provider1, "HTTP POST", "HTTPS")
+Rel(processor_container_1, provider2, "Failover", "HTTPS")
+Rel(processor_container_1, provider3, "Last resort", "HTTPS")
+
+Rel(processor_container_2, redis_streams, "XREADGROUP", "Redis Protocol")
+Rel(processor_container_2, postgres_write, "Insert reports", "SQL/TCP")
+Rel(processor_container_2, provider1, "HTTP POST", "HTTPS")
+
+Rel(cli_container, postgres_write, "Migrations", "SQL")
+
+Rel(prometheus, processor_container_1, "GET /metrics", "HTTP :9100")
+Rel(prometheus, processor_container_2, "GET /metrics", "HTTP :9100")
+Rel(grafana, prometheus, "Query metrics", "HTTP")
+
+note right of app_servers
+  **Current Capacity:**
+  • 2 API instances = 1,000 req/sec
+  • 2 Processor instances = 200 workers
+  • ~10M messages/day realistic
+
+  **Bottlenecks:**
+  1. Redis Streams single-node
+  2. Monolithic architecture
+  3. No horizontal auto-scaling
+  4. Single region only
+end note
+
+note right of data_tier
+  **Database Sizing:**
+  • Write: 50 conn pool max
+  • Read: 10 conn pool max
+  • Connection pooling via GORM
+
+  **Redis Limits:**
+  • 50K ops/sec max
+  • In-memory only
+  • AOF persistence (optional)
+  • No clustering in current setup
+end note
+
+note right of external
+  **Provider Integration:**
+  • HTTP REST APIs (not SMPP)
+  • Circuit breaker per provider
+  • 3 concurrent connections each
+  • Dynamic weight-based routing
+
+  **For 100M/day need:**
+  • SMPP protocol (4-10 binds/operator)
+  • 20-50 SMPP connections total
+  • ~1,000 msg/sec per connection
+end note
+
+SHOW_LEGEND()
+
+@enduml

@@ -1,0 +1,73 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+
+title Container Diagram - SMS Gateway (Current Implementation)
+
+Person(customer, "Customer", "Sends SMS messages")
+Person(admin, "Administrator")
+
+System_Boundary(sms_gateway, "SMS Gateway") {
+    Container(api_server, "API Server", "Go, FastHTTP", "REST API for message submission\nPort 8080\nFastHTTP router with middleware\n- Compression (level 6)\n- 5s timeout\n- Request logging\n- Panic recovery")
+
+    Container(processor, "Processor Service", "Go + Worker Pool", "Message processing with concurrency\n- 10 Redis Stream consumers\n- 100 goroutine workers\n- Result channel coordination\n- Circuit breaker pattern\nPort 9100 (metrics)")
+
+    Container(cli, "CLI Tool", "Go, Goose", "Database migrations")
+    Container(operator_mock, "Operator Mock", "Go, FastHTTP", "Test SMS provider simulator\nConfigurable latency & failure rates")
+
+    ContainerDb(postgres_write, "PostgreSQL (Write)", "PostgreSQL", "Primary database\n- customers (balance tracking)\n- messages (status tracking)\n- transactions (audit log)\n- delivery_reports")
+    ContainerDb(postgres_read, "PostgreSQL (Read)", "PostgreSQL", "Read replica\n- Customer validation\n- Query optimization")
+    ContainerQueue(redis, "Redis Streams", "Redis", "Message queues with priorities\n- Normal queue (standard traffic)\n- Express queue (priority OTP)\nXREADGROUP consumer pattern")
+}
+
+System_Ext(sms_providers, "SMS Providers", "External SMS services\n3 providers with weights\nCircuit breaker protection")
+System_Ext(prometheus, "Prometheus", "Metrics collection\n15s scrape interval")
+
+Rel(customer, api_server, "POST /api/v1/messages[/express]", "HTTPS/JSON")
+Rel(api_server, postgres_write, "DB transaction:\n1. Create message\n2. Create transaction\n3. Deduct balance", "SQL + GORM")
+Rel(api_server, postgres_read, "Validate customer & balance", "SQL")
+Rel(api_server, redis, "XADD to stream", "Redis Streams\nPriority routing")
+
+Rel(processor, redis, "XREADGROUP (batch=10)", "Redis Streams\n10 consumer instances")
+Rel(processor, postgres_write, "INSERT delivery_reports", "SQL")
+Rel(processor, postgres_read, "Query message details", "SQL")
+Rel(processor, sms_providers, "POST /send", "HTTPS\nGateway client with:\n- Weight-based selection\n- Circuit breaker\n- Retry with backoff")
+
+Rel(admin, cli, "Run migrations", "CLI")
+Rel(cli, postgres_write, "Goose migrations", "SQL")
+
+Rel(prometheus, processor, "GET /metrics", "HTTP :9100")
+
+Rel_Back(operator_mock, processor, "Test provider", "HTTPS :8081")
+
+note right of processor
+  **Worker Pool Pattern:**
+  Queue → messageHandler()
+    → Enqueue to worker pool
+    → workerHandler(100 workers)
+    → Process message
+    → Send result via channel
+    → ACK/NACK to Redis
+
+  **Throughput:**
+  • 100 workers @ 10 msg/sec each
+  • = 1,000 msg/sec sustained
+  • = ~86M msg/day theoretical
+  • = ~10M msg/day realistic (w/ errors)
+end note
+
+note left of redis
+  **Redis Streams Limits:**
+  • In-memory only (not durable like Kafka)
+  • Single-node bottleneck
+  • No native partitioning
+  • ~50K ops/sec max
+
+  **vs Kafka:**
+  • Kafka: 605 MB/s (15x faster)
+  • Kafka: Distributed & durable
+  • Kafka: Native partitioning
+end note
+
+@enduml

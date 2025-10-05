@@ -1,0 +1,115 @@
+@startuml
+title Gateway Client - Provider Selection & Circuit Breaker
+
+class Client {
+  -config : Config
+  -providers : []Provider
+  -httpClient : *fasthttp.Client
+  +SendSMS(ctx, req SendRequest) SendResponse
+  +GetStatus(ctx, id string) StatusResponse
+  +SelectBestProvider() *Provider
+  -rankProviders() []Provider
+}
+
+class Provider {
+  -name : string
+  -url : string
+  -weight : int
+  -metrics : *ProviderMetrics
+  -circuitBreaker : *CircuitBreaker
+  +IsAvailable() bool
+  +CalculateScore() float64
+  +Send(ctx, req) response
+}
+
+class ProviderMetrics {
+  -mu : sync.RWMutex
+  -totalRequests : int64
+  -successfulReqs : int64
+  -failedReqs : int64
+  -latencies : []time.Duration
+  +RecordSuccess(latency Duration)
+  +RecordFailure()
+  +SuccessRate() float64
+  +AvgLatencyMs() int64
+  +P95LatencyMs() int64
+  +Reset()
+}
+
+class CircuitBreaker {
+  -mu : sync.RWMutex
+  -state : State
+  -failureCount : int
+  -threshold : int
+  -timeout : Duration
+  -lastStateChange : time.Time
+  +RecordSuccess()
+  +RecordFailure()
+  +AllowRequest() bool
+  -setState(newState State)
+}
+
+enum State {
+  Closed
+  Open
+  HalfOpen
+}
+
+class HealthChecker {
+  -providers : []*Provider
+  -interval : Duration
+  -stopChan : chan struct{}
+  +Start()
+  +Stop()
+  -checkProvider(p *Provider)
+}
+
+Client o-- "1..*" Provider : manages
+Provider o-- "1" ProviderMetrics : tracks
+Provider o-- "1" CircuitBreaker : protected by
+CircuitBreaker --> State : has
+Client ..> HealthChecker : uses
+
+note right of Client::SelectBestProvider
+  **Selection Algorithm:**
+  1. Rank all providers by score
+  2. Score = weight × successRate × (1 - normalizedLatency)
+  3. Filter providers where circuitBreaker.AllowRequest() == false
+  4. Return highest scoring available provider
+end note
+
+note left of CircuitBreaker
+  **State Transitions:**
+
+  Closed → Open:
+  - When failureCount >= threshold
+
+  Open → HalfOpen:
+  - After timeout duration elapsed
+
+  HalfOpen → Closed:
+  - On successful request
+
+  HalfOpen → Open:
+  - On failed request
+
+  **Request Handling:**
+  - Closed: Allow all requests
+  - Open: Deny all requests
+  - HalfOpen: Allow limited test requests
+end note
+
+note bottom of ProviderMetrics
+  **Metrics Tracked:**
+  - Total request count
+  - Success/failure counts
+  - Sliding window of latencies
+  - Success rate calculation
+  - P50, P95, P99 latencies
+
+  **Thread Safety:**
+  - RWMutex for concurrent access
+  - Atomic operations for counters
+end note
+
+@enduml

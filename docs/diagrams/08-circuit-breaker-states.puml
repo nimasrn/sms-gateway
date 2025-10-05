@@ -1,0 +1,55 @@
+@startuml
+title Circuit Breaker State Machine
+
+[*] --> Closed
+
+state Closed {
+  Closed : Normal operation
+  Closed : All requests allowed
+  Closed : Tracking failures
+}
+
+state Open {
+  Open : Provider disabled
+  Open : All requests blocked
+  Open : Waiting for timeout
+}
+
+state HalfOpen {
+  HalfOpen : Testing recovery
+  HalfOpen : Limited requests allowed
+  HalfOpen : Evaluating health
+}
+
+Closed --> Open : Failure count >= threshold
+Open --> HalfOpen : Timeout elapsed
+HalfOpen --> Closed : Request succeeds
+HalfOpen --> Open : Request fails
+
+note right of Closed
+  **Closed State:**
+  - Provider is healthy
+  - All requests pass through
+  - Circuit breaker counts failures
+  - Transitions to Open when threshold exceeded
+end note
+
+note right of Open
+  **Open State:**
+  - Provider marked as unhealthy
+  - Fast-fail: reject all requests immediately
+  - No network calls to failing provider
+  - Wait for configured timeout (e.g., 30s)
+  - Then transition to Half-Open to test recovery
+end note
+
+note right of HalfOpen
+  **Half-Open State:**
+  - Testing if provider recovered
+  - Allow limited test requests (e.g., 2 requests)
+  - Success → transition back to Closed
+  - Failure → return to Open state
+  - Prevents thundering herd on recovery
+end note
+
+@enduml

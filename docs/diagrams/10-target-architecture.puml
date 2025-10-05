@@ -1,0 +1,149 @@
+@startuml
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_TOP_DOWN()
+
+title Target Architecture - Kafka Microservices (100M+ msg/day capacity)
+
+Person(customer, "Customer", "Multi-tenant applications")
+Person(admin, "Admin", "Operations team")
+
+System_Boundary(api_gateway_boundary, "API Gateway Layer") {
+    Container(api_gateway, "API Gateway", "Go, Gin", "Authentication, rate limiting\nToken bucket algorithm\nPer-customer limits\nPort 8080")
+    ContainerDb(redis_ratelimit, "Redis Cluster", "Redis", "Rate limit state\nToken buckets per customer\n5-10 nodes")
+}
+
+System_Boundary(messaging_layer, "Message Processing Layer") {
+    Container(message_service, "Message Service", "Go", "Validation, routing rules\nBalance deduction\nMessage enrichment")
+    Container(routing_service, "Routing Service", "Go", "LCR (Least Cost Routing)\nLLR (Least Loaded Routing)\nQuality-based selection")
+    Container(delivery_service, "Delivery Service", "Go", "SMPP protocol handler\n4-10 binds per operator\nSliding window async")
+}
+
+System_Boundary(support_services, "Support Services") {
+    Container(dlr_service, "DLR Service", "Go", "Delivery receipt handling\nWebhook delivery with retry\nHMAC signatures")
+    Container(inbound_service, "Inbound Service", "Go", "MO (Mobile-Originated)\nTwo-way messaging\nOpt-out management")
+    Container(compliance_service, "Compliance Service", "Go", "TCPA/GDPR compliance\nContent filtering\nQuiet hours enforcement")
+    Container(analytics_service, "Analytics Service", "Go", "Real-time dashboards\nDelivery rate tracking\nCost analytics")
+}
+
+System_Boundary(kafka_boundary, "Apache Kafka Cluster (5 brokers)") {
+    ContainerQueue(kafka_urgent, "Priority: Urgent", "Kafka Topic", "3 partitions\nOTP, 2FA messages\nlinger.ms=0")
+    ContainerQueue(kafka_high, "Priority: High", "Kafka Topic", "6 partitions\nTransactional SMS")
+    ContainerQueue(kafka_normal, "Priority: Normal", "Kafka Topic", "12 partitions\nStandard traffic")
+    ContainerQueue(kafka_bulk, "Priority: Bulk", "Kafka Topic", "24 partitions\nMarketing campaigns\nbatch.size=200K")
+    ContainerQueue(kafka_dlq, "Dead Letter Queue", "Kafka Topic", "Failed messages\nManual inspection")
+}
+
+System_Boundary(data_layer, "Data Layer") {
+    ContainerDb(postgres_write, "PostgreSQL (Write)", "PostgreSQL", "Accounts, messages\nTransactions, DLRs\nSynchronous replication")
+    ContainerDb(postgres_read, "PostgreSQL (Read)", "PostgreSQL", "Read replicas (3)\nQuery optimization")
+    ContainerDb(timeseries, "TimescaleDB", "PostgreSQL", "Time-series analytics\nMessage history")
+}
+
+System_Boundary(carriers, "Carrier Integration (SMPP)") {
+    System_Ext(carrier1, "Carrier 1", "SMPP 3.4\n10 binds (TRX mode)\n1,000 msg/sec per bind")
+    System_Ext(carrier2, "Carrier 2", "SMPP 3.4\n10 binds\nCircuit breaker")
+    System_Ext(carrier3, "Carrier 3", "SMPP 3.4\n5 binds\nBackup routing")
+}
+
+System_Ext(prometheus, "Prometheus", "Metrics")
+System_Ext(jaeger, "Jaeger", "Distributed tracing")
+System_Ext(elasticsearch, "ELK Stack", "Centralized logging")
+
+' Customer flow
+Rel(customer, api_gateway, "POST /v1/messages", "HTTPS/JSON")
+Rel(api_gateway, redis_ratelimit, "Check token bucket", "Redis Protocol")
+Rel(api_gateway, message_service, "Forward request", "gRPC/HTTP")
+
+' Message processing flow
+Rel(message_service, postgres_write, "Deduct balance\nCreate message record", "SQL Transaction")
+Rel(message_service, kafka_urgent, "Publish by priority", "Kafka Protocol")
+Rel(message_service, kafka_high, "Publish", "Kafka Protocol")
+Rel(message_service, kafka_normal, "Publish", "Kafka Protocol")
+Rel(message_service, kafka_bulk, "Publish", "Kafka Protocol")
+
+' Routing flow
+Rel(routing_service, kafka_normal, "Consume (partitioned)", "Kafka Consumer Group")
+Rel(routing_service, delivery_service, "Send to carrier", "gRPC")
+
+' Delivery flow
+Rel(delivery_service, carrier1, "submit_sm PDU", "SMPP/TCP :2775")
+Rel(delivery_service, carrier2, "submit_sm PDU", "SMPP/TCP")
+Rel(delivery_service, carrier3, "Failover", "SMPP/TCP")
+
+' DLR flow
+Rel_Back(carrier1, delivery_service, "deliver_sm (DLR)", "SMPP")
+Rel(delivery_service, dlr_service, "DLR event", "Kafka Topic")
+Rel(dlr_service, postgres_write, "Store DLR", "SQL")
+Rel(dlr_service, customer, "Webhook callback", "HTTPS + HMAC")
+
+' Failed messages
+Rel(routing_service, kafka_dlq, "Max retries exceeded", "Kafka")
+Rel(compliance_service, kafka_normal, "Filter content", "Kafka Consumer")
+
+' Observability
+Rel(prometheus, api_gateway, "Scrape /metrics", "HTTP")
+Rel(prometheus, delivery_service, "Scrape", "HTTP")
+Rel(jaeger, routing_service, "Trace propagation", "HTTP Headers")
+
+note right of kafka_boundary
+  **Kafka Configuration:**
+  • 5 brokers (i3en.2xlarge)
+  • Replication factor: 3
+  • 45 total partitions
+  • 7-day retention
+  • LZ4 compression
+
+  **Throughput:**
+  • 605 MB/s peak
+  • 15x faster than RabbitMQ
+  • Exactly-once semantics
+  • Horizontal scaling
+
+  **vs Current Redis:**
+  • Redis: 50K ops/sec
+  • Kafka: 605 MB/s = ~100K msg/sec
+end note
+
+note right of carriers
+  **SMPP Benefits:**
+  • 100-1000 msg/sec per bind
+  • 20-50 total binds
+  • Direct carrier integration
+  • Lower cost per message
+
+  **vs Current HTTP:**
+  • HTTP: 10-20 msg/sec
+  • SMPP: 1000 msg/sec
+  • 50x-100x throughput gain
+end note
+
+note right of api_gateway
+  **Rate Limiting:**
+  • Redis Lua scripts (atomic)
+  • Token bucket algorithm
+  • Burst capacity: 10-100x sustained
+  • Per-customer isolation
+
+  **Capacity:**
+  • 10-50 API Gateway instances
+  • Stateless (JWT auth)
+  • Horizontal auto-scaling
+end note
+
+note right of data_layer
+  **Database Strategy:**
+  • CQRS pattern (write/read split)
+  • Event sourcing via Kafka
+  • Sharding by customer_id
+  • Connection pooling: 50-100 conns
+
+  **For 100M/day:**
+  • ~1,157 writes/sec sustained
+  • ~5,000 writes/sec peak
+  • Requires sharding at 10K+ customers
+end note
+
+SHOW_LEGEND()
+
+@enduml
