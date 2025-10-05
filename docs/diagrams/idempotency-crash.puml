@@ -1,0 +1,121 @@
+@startuml Idempotency - Processor Crash Recovery
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam defaultFontSize 12
+
+actor Queue
+participant "Consumer A" as ConsumerA
+participant "Consumer B" as ConsumerB
+participant "Idempotency" as Idempotency
+database Redis
+participant "Gateway" as Gateway
+
+== Consumer A starts processing ==
+
+Queue -> ConsumerA: Message (ID: 123)
+activate ConsumerA
+
+ConsumerA -> Idempotency: AcquireProcessingLock(123)
+activate Idempotency
+
+Idempotency -> Redis: SETNX lock:123\nTTL=30s
+Redis --> Idempotency: OK
+
+Idempotency --> ConsumerA: ProcessingContext
+deactivate Idempotency
+
+ConsumerA -> Gateway: SendSMS(123)
+activate Gateway
+
+== Consumer A crashes before receiving response ==
+
+ConsumerA -> ConsumerA: 💥 CRASH!\n(process killed)
+destroy ConsumerA
+
+Gateway --> Gateway: Response sent\n(but no one listening)
+deactivate Gateway
+
+note right of Redis
+  **State after crash:**
+  lock:123 = exists (TTL counting down)
+  processed:123 = not set
+  Message stuck in queue (pending)
+end note
+
+== Lock expires after 30 seconds ==
+
+Redis -> Redis: 30 seconds pass...\nlock:123 TTL expires
+note right of Redis
+  **State after expiry:**
+  lock:123 = deleted (auto-expired)
+  processed:123 = not set
+  Message becomes available for retry
+end note
+
+== Queue delivers to Consumer B ==
+
+Queue -> ConsumerB: Claim stuck message (ID: 123)
+activate ConsumerB
+
+ConsumerB -> Idempotency: AcquireProcessingLock(123)
+activate Idempotency
+
+Idempotency -> Redis: EXISTS processed:123
+Redis --> Idempotency: 0 (not processed)
+
+note right
+  Check if Consumer A
+  successfully processed
+  before crashing
+end note
+
+Idempotency -> Redis: SETNX lock:123\nTTL=30s
+Redis --> Idempotency: OK (lock available)
+
+Idempotency --> ConsumerB: ProcessingContext\n{retry_count: 0}
+deactivate Idempotency
+
+== Consumer B completes processing ==
+
+ConsumerB -> Gateway: SendSMS(123)
+activate Gateway
+
+alt SMS was already sent by Consumer A
+  Gateway --> ConsumerB: Error: Duplicate\n(provider rejects)
+  ConsumerB -> Idempotency: MarkFailure(123)
+  note right
+    Will retry with
+    different provider
+  end note
+else SMS was not sent
+  Gateway --> ConsumerB: ✅ Success\n{status: DELIVERED}
+end
+
+deactivate Gateway
+
+ConsumerB -> Idempotency: MarkSuccess(123)
+activate Idempotency
+
+Idempotency -> Redis: SET processed:123 "1"\nTTL=24h
+Redis --> Idempotency: OK
+
+Idempotency -> Redis: DEL lock:123
+Redis --> Idempotency: OK
+
+Idempotency --> ConsumerB: Success
+deactivate Idempotency
+
+ConsumerB -> Queue: ACK
+deactivate ConsumerB
+
+note right of Redis
+  **Final State:**
+  processed:123 = "1" (24h)
+  lock:123 = deleted
+
+  **Result:**
+  System recovered automatically
+  SMS delivered exactly once ✓
+end note
+
+@enduml

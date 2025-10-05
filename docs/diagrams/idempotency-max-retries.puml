@@ -1,0 +1,109 @@
+@startuml Idempotency - Max Retries Exceeded
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam defaultFontSize 12
+
+actor Queue
+participant "Processor" as Processor
+participant "Idempotency" as Idempotency
+database Redis
+participant "Gateway" as Gateway
+database "PostgreSQL" as DB
+
+== Attempt 1 ==
+Queue -> Processor: Message (ID: 123)
+Processor -> Idempotency: AcquireProcessingLock(123)
+Idempotency -> Redis: GET retry:123
+Redis --> Idempotency: nil (retry_count = 0)
+Processor -> Gateway: SendSMS(123)
+Gateway --> Processor: ❌ Error
+Processor -> Idempotency: MarkFailure(123)
+Idempotency -> Redis: SET retry:123 "1"
+Processor -> Queue: NACK
+
+note right of Redis
+  retry:123 = "1"
+end note
+
+== Attempt 2 ==
+Queue -> Processor: Retry (ID: 123)
+Processor -> Idempotency: AcquireProcessingLock(123)
+Idempotency -> Redis: GET retry:123
+Redis --> Idempotency: "1" (retry_count = 1)
+Processor -> Gateway: SendSMS(123)
+Gateway --> Processor: ❌ Error
+Processor -> Idempotency: MarkFailure(123)
+Idempotency -> Redis: SET retry:123 "2"
+Processor -> Queue: NACK
+
+note right of Redis
+  retry:123 = "2"
+end note
+
+== Attempt 3 ==
+Queue -> Processor: Retry (ID: 123)
+Processor -> Idempotency: AcquireProcessingLock(123)
+Idempotency -> Redis: GET retry:123
+Redis --> Idempotency: "2" (retry_count = 2)
+Processor -> Gateway: SendSMS(123)
+Gateway --> Processor: ❌ Error
+Processor -> Idempotency: MarkFailure(123)
+Idempotency -> Redis: SET retry:123 "3"
+Processor -> Queue: NACK
+
+note right of Redis
+  retry:123 = "3"
+end note
+
+== Attempt 4 - Max Retries Check ==
+
+Queue -> Processor: Retry (ID: 123)
+activate Processor
+
+Processor -> Idempotency: AcquireProcessingLock(123)
+activate Idempotency
+
+Idempotency -> Redis: GET retry:123
+Redis --> Idempotency: "3"
+
+note right of Idempotency
+  retry_count = 3
+  >= maxRetries (3)
+  Stop retrying!
+end note
+
+Idempotency --> Processor: ❌ ErrMaxRetriesExceeded
+deactivate Idempotency
+
+Processor -> DB: CREATE delivery_report\n(status: FAILED)
+activate DB
+DB --> Processor: OK
+deactivate DB
+
+Processor -> Queue: ACK\n(move to DLQ)
+activate Queue
+Queue -> Queue: Move to\nmessages_queue:dlq
+deactivate Queue
+
+deactivate Processor
+
+note right of Queue
+  **Message in DLQ:**
+  - original_id: 123
+  - attempts: 3
+  - failed_at: timestamp
+  - Requires manual investigation
+end note
+
+note right of Redis
+  **Final State:**
+  retry:123 = "3" (24h)
+  processed:123 = not set
+  lock:123 = not acquired
+
+  **Result:**
+  Gave up after 3 attempts
+  Moved to DLQ for manual review
+end note
+
+@enduml

@@ -1,0 +1,71 @@
+@startuml Idempotency - Normal Processing Flow
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam defaultFontSize 12
+
+actor Queue
+participant "Processor\nConsumer" as Processor
+participant "Idempotency\nService" as Idempotency
+database Redis
+participant "Gateway\nClient" as Gateway
+participant "SMS\nProvider" as Provider
+database PostgreSQL
+
+Queue -> Processor: Message arrives\n(message_id: 123)
+activate Processor
+
+Processor -> Idempotency: AcquireProcessingLock(123)
+activate Idempotency
+
+Idempotency -> Redis: EXISTS processed:123\n(check if already sent)
+Redis --> Idempotency: 0 (not found)
+
+Idempotency -> Redis: GET retry:123\n(check retry count)
+Redis --> Idempotency: nil (first attempt)
+
+Idempotency -> Redis: SETNX lock:123 timestamp\nTTL=30s
+Redis --> Idempotency: OK (lock acquired)
+
+Idempotency --> Processor: ProcessingContext\n{retry_count: 0}
+deactivate Idempotency
+
+Processor -> Gateway: SendSMS(message_id: 123)
+activate Gateway
+Gateway -> Provider: POST /api/v1/sms/send
+activate Provider
+Provider --> Gateway: 200 OK\n{status: DELIVERED}
+deactivate Provider
+Gateway --> Processor: Success
+deactivate Gateway
+
+Processor -> PostgreSQL: CREATE delivery_report\n(status: DELIVERED)
+PostgreSQL --> Processor: OK
+
+Processor -> Idempotency: MarkSuccess(123)
+activate Idempotency
+
+Idempotency -> Redis: SET processed:123 "1"\nTTL=24h
+Redis --> Idempotency: OK
+
+Idempotency -> Redis: DEL lock:123
+Redis --> Idempotency: OK
+
+Idempotency -> Redis: DEL retry:123
+Redis --> Idempotency: OK
+
+Idempotency --> Processor: Success
+deactivate Idempotency
+
+Processor -> Queue: ACK message
+Queue --> Processor: Removed from queue
+
+deactivate Processor
+
+note right of Redis
+  **Final State:**
+  processed:123 = "1" (24h TTL)
+  lock:123 = deleted
+  retry:123 = deleted
+end note
+
+@enduml

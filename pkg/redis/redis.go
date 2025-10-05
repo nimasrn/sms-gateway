@@ -22,7 +22,9 @@ type StreamMessage struct {
 type RedisAdapter interface {
 	// Basic operations
 	Set(key string, value []byte, ttl time.Duration) error
+	SetNX(key string, value []byte, ttl time.Duration) (bool, error)
 	Get(key string) ([]byte, error)
+	Del(key string) error
 	SMembers(key string) ([]string, error)
 	SAdd(key string, value ...interface{}) error
 	HGet(key string, field string) ([]byte, error)
@@ -126,12 +128,25 @@ func (r *redisAdapter) Set(key string, value []byte, ttl time.Duration) error {
 	return st.Err()
 }
 
+func (r *redisAdapter) SetNX(key string, value []byte, ttl time.Duration) (bool, error) {
+	cmd := r.Conn.SetNX(context.Background(), r.prefix+key, value, ttl)
+	if err := cmd.Err(); err != nil {
+		return false, err
+	}
+	return cmd.Val(), nil
+}
+
 func (r *redisAdapter) Get(key string) ([]byte, error) {
 	st := r.Conn.Get(context.Background(), r.prefix+key)
 	if err := st.Err(); err != nil {
 		return nil, err
 	}
 	return st.Bytes()
+}
+
+func (r *redisAdapter) Del(key string) error {
+	cmd := r.Conn.Del(context.Background(), r.prefix+key)
+	return cmd.Err()
 }
 
 func (r *redisAdapter) SMembers(key string) ([]string, error) {

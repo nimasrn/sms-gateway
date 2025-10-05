@@ -1,0 +1,120 @@
+@startuml Idempotency - State Machine
+!theme plain
+skinparam state {
+  BackgroundColor<<Success>> LightGreen
+  BackgroundColor<<Failure>> LightCoral
+  BackgroundColor<<Processing>> LightBlue
+  BorderColor Black
+  FontSize 12
+}
+
+[*] --> MessageReceived
+
+state MessageReceived {
+  state "Message\nReceived\nfrom Queue" as Received
+}
+
+MessageReceived --> CheckProcessed: Attempt to\nAcquire Lock
+
+state CheckProcessed {
+  state "Check\nProcessed\nMarker" as Check: EXISTS processed:{id}
+}
+
+CheckProcessed --> AlreadyProcessed: Found\n(exists = 1)
+CheckProcessed --> CheckRetries: Not Found\n(exists = 0)
+
+state AlreadyProcessed<<Success>> {
+  state "Skip\nProcessing" as Skip: Message already sent
+  state "Return\nSuccess" as Return1: ACK to queue
+}
+
+Skip --> Return1
+Return1 --> [*]
+
+state CheckRetries {
+  state "Get Retry\nCount" as GetRetry: GET retry:{id}
+  state "Compare" as Compare: retry_count >= maxRetries?
+}
+
+GetRetry --> Compare
+
+Compare --> MaxRetriesExceeded: YES\n(>= 3)
+Compare --> AcquireLock: NO\n(< 3)
+
+state MaxRetriesExceeded<<Failure>> {
+  state "Give Up" as GiveUp: Stop retrying
+  state "Create\nFailed Report" as Report: Save to DB
+  state "Move to DLQ" as DLQ: ACK to queue
+}
+
+GiveUp --> Report
+Report --> DLQ
+DLQ --> [*]
+
+state AcquireLock {
+  state "Try Lock" as TryLock: SETNX lock:{id}
+}
+
+AcquireLock --> LockFailed: Failed\n(already locked)
+AcquireLock --> Processing: Success\n(lock acquired)
+
+state LockFailed<<Failure>> {
+  state "Another\nConsumer" as Other: Lock held by\nanother consumer
+  state "Return Error" as ReturnErr: NACK to queue
+}
+
+Other --> ReturnErr
+ReturnErr --> [*]: Will retry later
+
+state Processing<<Processing>> {
+  state "Send SMS" as Send: Gateway.SendSMS()
+  state "Wait Response" as Wait
+}
+
+Send --> Wait
+
+Wait --> SendSuccess: Success\n(delivered)
+Wait --> SendFailed: Error\n(timeout/error)
+
+state SendSuccess<<Success>> {
+  state "Mark\nProcessed" as Mark: SET processed:{id} 1\nTTL=24h
+  state "Cleanup" as Cleanup1: DEL lock:{id}\nDEL retry:{id}
+  state "Save Report" as Save: CREATE delivery_report
+  state "ACK Queue" as ACK1
+}
+
+Mark --> Cleanup1
+Cleanup1 --> Save
+Save --> ACK1
+ACK1 --> [*]
+
+state SendFailed<<Failure>> {
+  state "Increment\nRetry" as Increment: SET retry:{id}\n(retry_count + 1)
+  state "Release Lock" as Release: DEL lock:{id}
+  state "NACK Queue" as NACK
+}
+
+Increment --> Release
+Release --> NACK
+NACK --> [*]: Will retry
+
+note right of AlreadyProcessed
+  **24-hour Deduplication**
+  Prevents duplicate sends
+  from queue redeliveries
+end note
+
+note right of AcquireLock
+  **30-second Lock**
+  Prevents concurrent
+  processing by multiple
+  consumers
+end note
+
+note right of CheckRetries
+  **Max 3 Retries**
+  Prevents infinite
+  retry loops
+end note
+
+@enduml

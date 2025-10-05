@@ -1,0 +1,111 @@
+@startuml Redis Keys - Lifecycle
+!theme plain
+
+!define REDIS_COLOR #FFE6E6
+!define LOCK_COLOR #E6F3FF
+!define RETRY_COLOR #FFF9E6
+!define PROCESSED_COLOR #E6FFE6
+
+participant "Processor" as P
+database "Redis" as R
+
+== Message Processing Starts ==
+
+P -> R: SETNX lock:123 "timestamp"\nTTL=30s
+note right R: <<LOCK_COLOR>>**Short-term Lock**\nPrevents concurrent processing
+
+P -> R: GET retry:123
+note right R: <<RETRY_COLOR>>**Retry Counter**\nTracks failure attempts
+
+== Scenario 1: Success (Normal Flow) ==
+
+group Success Path
+  P -> R: SET processed:123 "1"\nTTL=24h
+  note right R: <<PROCESSED_COLOR>>**Processed Marker**\nPrevents duplicates for 24h
+
+  P -> R: DEL lock:123
+  note right R: Lock removed\n(no longer needed)
+
+  P -> R: DEL retry:123
+  note right R: Retry counter removed\n(no longer needed)
+end
+
+note over R
+  **Final State (Success):**
+  ✅ processed:123 = "1" (24h)
+  ❌ lock:123 = deleted
+  ❌ retry:123 = deleted
+end note
+
+== Scenario 2: Failure (With Retry) ==
+
+group Failure Path
+  P -> R: SET retry:123 "1"\nTTL=24h
+  note right R: <<RETRY_COLOR>>**Increment Counter**\nAttempt 1 failed
+
+  P -> R: DEL lock:123
+  note right R: Release lock\nfor next attempt
+end
+
+note over R
+  **State After Failure:**
+  ❌ processed:123 = not set
+  ❌ lock:123 = deleted
+  ✅ retry:123 = "1" (24h)
+end note
+
+== Scenario 3: Lock Expiry (Crash) ==
+
+group Processor Crash
+  note over P: 💥 Process crashes
+  R -> R: 30 seconds pass...
+  R -> R: AUTO-EXPIRE lock:123
+  note right R: Lock auto-removes\nAllows recovery
+end
+
+note over R
+  **State After Lock Expiry:**
+  ❌ processed:123 = not set
+  ❌ lock:123 = auto-deleted (expired)
+  ✅ retry:123 = persists
+end note
+
+== Scenario 4: Max Retries Exceeded ==
+
+group Max Retries
+  P -> R: GET retry:123
+  R --> P: "3" (max reached)
+
+  note over P: Don't acquire lock\nGive up processing
+end
+
+note over R
+  **State (Max Retries):**
+  ❌ processed:123 = not set
+  ❌ lock:123 = not acquired
+  ✅ retry:123 = "3" (24h, for audit)
+end note
+
+== Key Lifecycle Summary ==
+
+note over P, R
+  **Lock Key** (lock:123):
+  - Created: SETNX (atomic)
+  - Lifetime: 30 seconds
+  - Purpose: Prevent concurrent processing
+  - Cleanup: Manual DEL or auto-expire
+
+  **Retry Key** (retry:123):
+  - Created: On first failure
+  - Lifetime: 24 hours
+  - Purpose: Track retry attempts
+  - Cleanup: Manual DEL on success
+
+  **Processed Key** (processed:123):
+  - Created: On successful send
+  - Lifetime: 24 hours
+  - Purpose: Deduplication window
+  - Cleanup: Auto-expire after 24h
+end note
+
+@enduml

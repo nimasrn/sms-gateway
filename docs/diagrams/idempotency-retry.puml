@@ -1,0 +1,163 @@
+@startuml Idempotency - Failure and Retry
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam defaultFontSize 12
+
+actor Queue
+participant "Processor" as Processor
+participant "Idempotency" as Idempotency
+database Redis
+participant "Gateway" as Gateway
+
+== Attempt 1: Initial Processing ==
+
+Queue -> Processor: Message (ID: 123)
+activate Processor
+
+Processor -> Idempotency: AcquireProcessingLock(123)
+activate Idempotency
+
+Idempotency -> Redis: GET retry:123
+Redis --> Idempotency: nil (first attempt)
+
+Idempotency -> Redis: SETNX lock:123
+Redis --> Idempotency: OK
+
+Idempotency --> Processor: ProcessingContext\n{retry_count: 0}
+deactivate Idempotency
+
+Processor -> Gateway: SendSMS(123)
+activate Gateway
+Gateway --> Processor: ❌ Error 500\n(provider timeout)
+deactivate Gateway
+
+Processor -> Idempotency: MarkFailure(123, error)
+activate Idempotency
+
+Idempotency -> Redis: SET retry:123 "1"\nTTL=24h
+Redis --> Idempotency: OK
+
+Idempotency -> Redis: DEL lock:123
+Redis --> Idempotency: OK
+
+Idempotency --> Processor: Failure marked
+deactivate Idempotency
+
+Processor -> Queue: NACK (return error)
+deactivate Processor
+
+note right of Redis
+  **State after Attempt 1:**
+  retry:123 = "1"
+  lock:123 = deleted
+  processed:123 = not set
+end note
+
+== Attempt 2: Retry (1 minute later) ==
+
+Queue -> Processor: Retry message (ID: 123)
+activate Processor
+
+Processor -> Idempotency: AcquireProcessingLock(123)
+activate Idempotency
+
+Idempotency -> Redis: GET retry:123
+Redis --> Idempotency: "1" (retry count)
+
+note right
+  retry_count = 1
+  < maxRetries (3)
+  Continue processing
+end note
+
+Idempotency -> Redis: SETNX lock:123
+Redis --> Idempotency: OK
+
+Idempotency --> Processor: ProcessingContext\n{retry_count: 1, is_retry: true}
+deactivate Idempotency
+
+Processor -> Gateway: SendSMS(123)
+activate Gateway
+Gateway --> Processor: ❌ Error 503\n(provider unavailable)
+deactivate Gateway
+
+Processor -> Idempotency: MarkFailure(123, error)
+activate Idempotency
+
+Idempotency -> Redis: SET retry:123 "2"\nTTL=24h
+Redis --> Idempotency: OK
+
+Idempotency -> Redis: DEL lock:123
+Redis --> Idempotency: OK
+
+Idempotency --> Processor: Failure marked
+deactivate Idempotency
+
+Processor -> Queue: NACK (return error)
+deactivate Processor
+
+note right of Redis
+  **State after Attempt 2:**
+  retry:123 = "2"
+  lock:123 = deleted
+  processed:123 = not set
+end note
+
+== Attempt 3: Final Retry (2 minutes later) ==
+
+Queue -> Processor: Retry message (ID: 123)
+activate Processor
+
+Processor -> Idempotency: AcquireProcessingLock(123)
+activate Idempotency
+
+Idempotency -> Redis: GET retry:123
+Redis --> Idempotency: "2" (retry count)
+
+note right
+  retry_count = 2
+  < maxRetries (3)
+  Continue processing
+end note
+
+Idempotency -> Redis: SETNX lock:123
+Redis --> Idempotency: OK
+
+Idempotency --> Processor: ProcessingContext\n{retry_count: 2, is_retry: true}
+deactivate Idempotency
+
+Processor -> Gateway: SendSMS(123)
+activate Gateway
+Gateway --> Processor: ✅ Success\n{status: DELIVERED}
+deactivate Gateway
+
+Processor -> Idempotency: MarkSuccess(123)
+activate Idempotency
+
+Idempotency -> Redis: SET processed:123 "1"\nTTL=24h
+Redis --> Idempotency: OK
+
+Idempotency -> Redis: DEL lock:123
+Redis --> Idempotency: OK
+
+Idempotency -> Redis: DEL retry:123
+Redis --> Idempotency: OK
+
+Idempotency --> Processor: Success
+deactivate Idempotency
+
+Processor -> Queue: ACK
+deactivate Processor
+
+note right of Redis
+  **Final State:**
+  processed:123 = "1" (24h)
+  retry:123 = deleted
+  lock:123 = deleted
+
+  **Result:**
+  SMS sent successfully
+  on 3rd attempt ✓
+end note
+
+@enduml

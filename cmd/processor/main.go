@@ -93,8 +93,12 @@ func main() {
 
 	deliveryReportRepo := repository.NewDeliveryReportRepository(db)
 
+	// Initialize idempotency service
+	idempotencyConfig := processor.DefaultIdempotencyConfig()
+	idempotencyService := processor.NewIdempotencyService(redisAdap, idempotencyConfig)
+
 	service, err := processor.NewProcessorService(redisAdap)
-	service.RegisterProcessor(processor.NewSMSMessageProcessor(client, deliveryReportRepo))
+	service.RegisterProcessor(processor.NewSMSMessageProcessor(client, deliveryReportRepo, idempotencyService))
 
 	if err != nil {
 		logger.Error("failed to run the processor", "error", err)

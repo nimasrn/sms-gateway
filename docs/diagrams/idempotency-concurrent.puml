@@ -1,0 +1,95 @@
+@startuml Idempotency - Concurrent Processing
+!theme plain
+skinparam sequenceMessageAlign center
+skinparam defaultFontSize 12
+
+actor "Queue" as Queue
+participant "Consumer A" as ConsumerA
+participant "Consumer B" as ConsumerB
+participant "Idempotency\nService" as Idempotency
+database Redis
+
+== Queue delivers same message to both consumers ==
+
+Queue -> ConsumerA: Message (ID: 123)
+activate ConsumerA
+
+Queue -> ConsumerB: Message (ID: 123)
+activate ConsumerB
+
+== Consumer A acquires lock first ==
+
+ConsumerA -> Idempotency: AcquireProcessingLock(123)
+activate Idempotency
+
+Idempotency -> Redis: SETNX lock:123\n(timestamp_A)
+Redis --> Idempotency: TRUE ✓
+
+Idempotency --> ConsumerA: ProcessingContext\n{locked: true}
+deactivate Idempotency
+
+== Consumer B tries to acquire same lock ==
+
+ConsumerB -> Idempotency: AcquireProcessingLock(123)
+activate Idempotency
+
+Idempotency -> Redis: EXISTS processed:123
+Redis --> Idempotency: 0 (not processed yet)
+
+Idempotency -> Redis: SETNX lock:123\n(timestamp_B)
+Redis --> Idempotency: FALSE ✗\n(lock exists)
+
+Idempotency --> ConsumerB: ErrLockAcquireFailed
+deactivate Idempotency
+
+ConsumerB -> Queue: NACK\n(return error)
+deactivate ConsumerB
+note right of ConsumerB
+  Consumer B gives up
+  Message stays in queue
+  Will retry later
+end note
+
+== Consumer A continues processing ==
+
+ConsumerA -> ConsumerA: Send SMS successfully
+
+ConsumerA -> Idempotency: MarkSuccess(123)
+activate Idempotency
+
+Idempotency -> Redis: SET processed:123 "1"\nTTL=24h
+Redis --> Idempotency: OK
+
+Idempotency -> Redis: DEL lock:123
+Redis --> Idempotency: OK
+
+Idempotency --> ConsumerA: Success
+deactivate Idempotency
+
+ConsumerA -> Queue: ACK
+deactivate ConsumerA
+
+== Queue redelivers to Consumer B ==
+
+Queue -> ConsumerB: Retry message (ID: 123)
+activate ConsumerB
+
+ConsumerB -> Idempotency: AcquireProcessingLock(123)
+activate Idempotency
+
+Idempotency -> Redis: EXISTS processed:123
+Redis --> Idempotency: 1 ✓ (found!)
+
+Idempotency --> ConsumerB: ErrAlreadyProcessed
+deactivate Idempotency
+
+ConsumerB -> Queue: ACK\n(skip duplicate)
+deactivate ConsumerB
+
+note right of Redis
+  **Result:**
+  SMS sent only once by Consumer A
+  Consumer B skipped duplicate
+end note
+
+@enduml
