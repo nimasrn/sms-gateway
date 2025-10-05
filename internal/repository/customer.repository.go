@@ -8,6 +8,7 @@ import (
 
 	"github.com/nimasrn/message-gateway/pkg/pg"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -64,28 +65,40 @@ func (r *CustomerRepository) DeductBalance(ctx context.Context, customerID int64
 	return fmt.Errorf("%w: failed after %d attempts", ErrMaxRetriesExceeded, maxRetries+1)
 }
 
-// deductBalanceAttempt performs a single deduction attempt.
 func (r *CustomerRepository) deductBalanceAttempt(ctx context.Context, customerID int64, amount uint) error {
-	// Atomic UPDATE with all conditions in WHERE clause
+	var entity CustomerEntity
+
+	err := r.Write(ctx).WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id = ?", customerID).
+		First(&entity).
+		Error
+
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrCustomerNotFound
+		}
+		return err
+	}
+
+	if entity.Balance < amount {
+		return ErrInsufficientBalance
+	}
+
 	result := r.Write(ctx).WithContext(ctx).
 		Model(&CustomerEntity{}).
-		Where("id = ? AND balance >= ?",
-			customerID,
-			amount,
-		).
+		Where("id = ?", customerID).
 		Update("balance", gorm.Expr("balance - ?", amount))
 
 	if result.Error != nil {
 		return result.Error
 	}
 
-	// Update succeeded
-	if result.RowsAffected > 0 {
-		return nil
+	if result.RowsAffected == 0 {
+		return ErrConcurrentUpdate
 	}
 
-	// No rows updated - determine why
-	return r.checkDeductionFailureReason(ctx, customerID, amount)
+	return nil
 }
 
 // checkDeductionFailureReason determines why the deduction failed.
@@ -111,39 +124,72 @@ func (r *CustomerRepository) checkDeductionFailureReason(ctx context.Context, cu
 	return ErrConcurrentUpdate
 }
 
-// AddBalance performs atomic balance addition with automatic retry.
+// AddBalance performs atomic balance addition with automatic retry using SELECT FOR UPDATE.
 // This is used for credits/deposits (e.g., customer top-up).
 func (r *CustomerRepository) AddBalance(ctx context.Context, customerID int64, amount uint) error {
 	const maxRetries = 3
 	const baseDelay = 2 * time.Millisecond
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		result := r.Write(ctx).WithContext(ctx).
-			Model(&CustomerEntity{}).
-			Where("id = ?", customerID).
-			Update("balance", gorm.Expr("balance + ?", amount))
+		err := r.addBalanceAttempt(ctx, customerID, amount)
 
-		if result.Error != nil {
-			if attempt < maxRetries {
-				delay := baseDelay * time.Duration(1<<attempt)
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(delay):
-					continue
-				}
+		if err == nil {
+			return nil // Success!
+		}
+
+		// Don't retry on permanent errors
+		if errors.Is(err, ErrCustomerNotFound) {
+			return err
+		}
+
+		// Retry on transient errors
+		if attempt < maxRetries {
+			delay := baseDelay * time.Duration(1<<attempt)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+				continue
 			}
-			return result.Error
 		}
-
-		if result.RowsAffected == 0 {
-			return ErrCustomerNotFound
-		}
-
-		return nil
 	}
 
-	return ErrMaxRetriesExceeded
+	return fmt.Errorf("%w: failed after %d attempts", ErrMaxRetriesExceeded, maxRetries+1)
+}
+
+// addBalanceAttempt performs a single addition attempt using SELECT FOR UPDATE.
+func (r *CustomerRepository) addBalanceAttempt(ctx context.Context, customerID int64, amount uint) error {
+	var entity CustomerEntity
+
+	// Step 1: SELECT FOR UPDATE - Acquire pessimistic lock
+	err := r.Write(ctx).WithContext(ctx).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("id = ?", customerID).
+		First(&entity).
+		Error
+
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrCustomerNotFound
+		}
+		return err
+	}
+
+	// Step 2: Update balance (safe - we have the lock)
+	result := r.Write(ctx).WithContext(ctx).
+		Model(&CustomerEntity{}).
+		Where("id = ?", customerID).
+		Update("balance", gorm.Expr("balance + ?", amount))
+
+	if result.Error != nil {
+		return result.Error
+	}
+
+	if result.RowsAffected == 0 {
+		return ErrCustomerNotFound
+	}
+
+	return nil
 }
 
 func (r *CustomerRepository) GetBalance(ctx context.Context, customerID int64) (uint, error) {
