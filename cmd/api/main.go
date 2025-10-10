@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/nimasrn/message-gateway/internal/config"
@@ -126,7 +127,7 @@ func main() {
 
 	// Create new server
 	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Kill)
+	signal.Notify(c, os.Kill, os.Interrupt, syscall.SIGTERM)
 
 	go func() {
 		var err = s.ListenAndServe(config.Get().HttpListenAddr)
